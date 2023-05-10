@@ -1,11 +1,4 @@
-use std::{
-    marker::PhantomData,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread::JoinHandle,
-};
+use std::{marker::PhantomData, thread::JoinHandle};
 
 use std::io;
 use std::thread;
@@ -16,20 +9,24 @@ mod future;
 // TODO :: use trait alias once #![feature(trait_alias)] is stable
 // pub trait ThreadFn<Output> = FnOnce() -> Output + Send;
 
+/// Trait alias for functions that can be passed to [RaiiThreads](RaiiThread).
 pub trait ThreadFn<Output>: FnOnce() -> Output + Send {}
 impl<Output, T: FnOnce() -> Output + Send> ThreadFn<Output> for T {}
 
+/// Builder for [RaiiThreads](RaiiThread).
 #[derive(Default, Debug)]
 pub struct RaiiThreadBuilder {
-    name: Option<String>,
+    pub name: Option<String>,
 }
 
 impl RaiiThreadBuilder {
+    /// Set the thread's name.
     pub fn name(mut self, name: String) -> Self {
         self.name.replace(name);
         self
     }
 
+    /// Spawn the thread.
     pub fn spawn<'data, Output: Send + 'static>(
         self,
         f: impl ThreadFn<Output> + 'data,
@@ -40,31 +37,23 @@ impl RaiiThreadBuilder {
         let f_static: Box<dyn ThreadFn<Output> + 'static> =
             unsafe { std::mem::transmute::<Box<dyn ThreadFn<Output> + 'data>, _>(Box::new(f)) };
 
-        let done_flag = Arc::new(AtomicBool::new(false));
-        let done_flag_ext = done_flag.clone();
-
         Ok(RaiiThread {
             handle: Some({
                 let mut builder = std::thread::Builder::new();
                 if let Some(n) = self.name {
                     builder = builder.name(n);
                 }
-                builder.spawn(move || {
-                    let res = f_static();
-                    done_flag_ext.store(true, Ordering::Relaxed);
-                    res
-                })?
+                builder.spawn(f_static)?
             }),
-            done_flag,
             _lifetime: Default::default(),
         })
     }
 }
 
+/// Thread wrapper that allows passing objects by reference into the thread closure.
 #[derive(Debug)]
 pub struct RaiiThread<'data, Output> {
     handle: Option<JoinHandle<Output>>,
-    done_flag: Arc<AtomicBool>,
     _lifetime: PhantomData<&'data ()>,
 }
 
@@ -77,24 +66,39 @@ impl<'data, Output> Drop for RaiiThread<'data, Output> {
 }
 
 impl<'data, Output: Send + 'static> RaiiThread<'data, Output> {
+    /// Begin building a new [RaiiThread].
     #[inline]
     pub fn builder() -> RaiiThreadBuilder {
         RaiiThreadBuilder::default()
     }
 
+    /// Spawn a new thread using the provided function.
     #[inline]
     pub fn spawn(f: impl ThreadFn<Output> + 'data) -> io::Result<Self> {
         Self::builder().spawn(f)
     }
 
-    pub fn is_done(&self) -> bool {
-        self.done_flag.load(Ordering::Relaxed)
+    /// Whether the thread has finished running.
+    #[inline]
+    pub fn is_finished(&self) -> bool {
+        self.handle
+            .as_ref()
+            .map(JoinHandle::is_finished)
+            .unwrap_or(true)
     }
 
+    /// Join the thread and return its output.
+    #[inline]
     pub fn join(&mut self) -> thread::Result<Output> {
         self.handle.take().unwrap().join()
     }
 
+    /// Return the raw [JoinHandle] and `done` flag associated with this thread.
+    ///
+    /// # Safety
+    ///
+    /// Any resources borrowed by the function passed to this thread must outlive it.
+    #[inline]
     pub unsafe fn leak(mut self) -> JoinHandle<Output> {
         self.handle.take().unwrap()
     }
